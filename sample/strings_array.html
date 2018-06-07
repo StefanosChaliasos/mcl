@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+  <script src="strings_array.js"></script>
+  <script>
+    Module.addOnPreMain(function() {
+      var instance = new Module.MyClass();
+       console.log('string 1: ' + instance.getString(1));
+       console.log('string 2: ' + instance.getString(2));
+       console.log('string 3: ' + instance.getString(3));
+    });
+  </script>
+</html>
