@@ -16,6 +16,7 @@ static cybozu::RandomGenerator rg;
 
 using namespace emscripten;
 using namespace mcl::bn256;
+using ElGamal_pair  = std::pair<G2, G2>;
 
 template<typename T>
 void copyToVector(const val &typedArray, std::vector<T> &vec)
@@ -102,7 +103,7 @@ std::string vote(std::string pk, std::string vote)
     return ciphertexts;
 }
 
-std::map<std::string, int> create_table()
+std::map<std::string, int> create_table(int n)
 {
     initPairing(mcl::bn::CurveSNARK1);
 
@@ -111,11 +112,10 @@ std::map<std::string, int> create_table()
     const char *ba = "644888581738283025171396578091639672120333224302184904896215738366765861164";
     const char *bb = "20532875081203448695448744255224543661959516361327385779878476709582931298750";
 
-    initPairing(mcl::bn::CurveSNARK1);
     G2 Q(Fp2(aa, ab), Fp2(ba, bb));
 
     std::map<std::string, int> table;
-    for(int i = 1; i < 4; i++) {
+    for(int i = 1; i <= n; i++) {
         G2 elem;
         G2::mul(elem,Q,i);
         elem.setIoMode(10);
@@ -123,19 +123,88 @@ std::map<std::string, int> create_table()
         ss << elem;
         std::string s = ss.str();
         std::string key = ss.str();
-        key.erase(remove_if(key.begin(), key.end(), isspace), key.end());
+        // key.erase(remove_if(key.begin(), key.end(), isspace), key.end()); // remove spaces
+        // key.erase(key[0]);
         table[key] = i;
     }
     return table;
 }
 
-void decrypt(val typedArray)
+std::vector<ElGamal_pair> deserialize_ciphertexts(std::vector<std::string> input)
 {
-    std::vector<std::string> ciphers;
-    copyToVector(typedArray, ciphers);
-    for (auto cipher : ciphers) {
-        std::cout << cipher << std::endl;
+    initPairing(mcl::bn::CurveSNARK1);
+    std::vector<ElGamal_pair> ciphertexts;
+    std::string template_g2 = "1 ";
+    for(std::vector<std::string>::size_type i = 0; i != input.size(); i++) {
+        std::string g2_c1 = "1 ";
+        g2_c1 += input[i++];
+        g2_c1 += " ";
+        g2_c1 += input[i++];
+        g2_c1 += " ";
+        g2_c1 += input[i++];
+        g2_c1 += " ";
+        g2_c1 += input[i++];
+        G2 c1;
+        std::stringstream ssc1;
+        ssc1.str (g2_c1);
+        ssc1 >> c1;
+        std::string g2_c2 = "1 ";
+        g2_c2 += input[i++];
+        g2_c2 += " ";
+        g2_c2 += input[i++];
+        g2_c2 += " ";
+        g2_c2 += input[i++];
+        g2_c2 += " ";
+        g2_c2 += input[i];
+        G2 c2;
+        std::stringstream ssc2;
+        ssc1.str (g2_c2);
+        ssc1 >> c2;
+        std::pair<G2, G2> c;
+        c.first = c1;
+        c.second = c2;
+        ciphertexts.push_back(c);
     }
+    return ciphertexts;
+}
+
+// void decrypt(std::map<std::string, int> table,
+std::vector<std::string> decrypt(std::map<std::string, int> table,
+                                 std::vector<std::string> string_ciphers,
+                                 std::string secret)
+{
+    initPairing(mcl::bn::CurveSNARK1);
+
+    Fr sk;
+    std::stringstream sssk;
+    sssk.str (secret);
+    sssk >> sk;
+
+    std::cout << sk << std::endl;
+
+
+    std::vector<std::pair<G2, G2>> ciphertexts =
+                                   deserialize_ciphertexts(string_ciphers);
+
+    std::vector<std::string> decrypted_votes;
+    for (auto ciphertext: ciphertexts) {
+        G2 t;
+        G2::mul(t,ciphertext.first,sk);
+        G2 key; // the map key for decryption
+        G2::add(key,ciphertext.second,t);
+
+        key.setIoMode(10);
+
+        key.setIoMode(10);
+        std::stringstream ss;
+        ss << key;
+        std::string key_str = ss.str();
+        // key.erase(remove_if(key.begin(), key.end(), isspace), key.end()); // remove spaces
+        // key.erase(key[0]);
+        std::string vote = std::to_string(table[key_str]);
+        decrypted_votes.push_back(vote);
+    }
+    return decrypted_votes;
 }
 
 emscripten::val STLvector_to_array()
@@ -155,5 +224,10 @@ EMSCRIPTEN_BINDINGS(my_module) {
     function("keygen", &keygen);
     function("vote", &vote);
     function("decrypt", &decrypt);
-    function("STLvector_to_array", &STLvector_to_array);
+    function("create_table", &create_table);
+}
+
+EMSCRIPTEN_BINDINGS(stl_wrappers) {
+    register_vector<std::string>("Ciphertexts");
+    register_map<std::string, int>("Table");
 }
