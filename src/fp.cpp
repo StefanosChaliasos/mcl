@@ -35,14 +35,6 @@ void Op::destroyFpGenerator(FpGenerator *fg)
 {
 	delete fg;
 }
-#else
-FpGenerator *Op::createFpGenerator()
-{
-	return 0;
-}
-void Op::destroyFpGenerator(FpGenerator *)
-{
-}
 #endif
 
 inline void setUnitAsLE(void *p, Unit x)
@@ -102,15 +94,25 @@ bool isEnableJIT()
 	/* -1:not init, 0:disable, 1:enable */
 	static int status = -1;
 	if (status == -1) {
-		const size_t size = 4096;
-		uint8_t *p = (uint8_t*)malloc(size * 2);
-		uint8_t *aligned = Xbyak::CodeArray::getAlignedAddress(p, size);
-		bool ret = Xbyak::CodeArray::protect(aligned, size, true);
-		status = ret ? 1 : 0;
-		if (ret) {
-			Xbyak::CodeArray::protect(aligned, size, false);
+#ifndef _MSC_VER
+		status = 1;
+		FILE *fp = fopen("/sys/fs/selinux/enforce", "rb");
+		if (fp) {
+			char c;
+			if (fread(&c, 1, 1, fp) == 1 && c == '1') {
+				status = 0;
+			}
+			fclose(fp);
 		}
-		free(p);
+#endif
+		if (status != 0) {
+			MIE_ALIGN(4096) char buf[4096];
+			bool ret = Xbyak::CodeArray::protect(buf, sizeof(buf), true);
+			status = ret ? 1 : 0;
+			if (ret) {
+				Xbyak::CodeArray::protect(buf, sizeof(buf), false);
+			}
+		}
 	}
 	return status != 0;
 #else
@@ -369,15 +371,15 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, Mode mode, size_t mclMaxBi
 	if (maxBitSize > MCL_MAX_BIT_SIZE) return false;
 	if (_p <= 0) return false;
 	clear();
-	bool b;
+	maxN = (maxBitSize + fp::UnitBitSize - 1) / fp::UnitBitSize;
+	N = gmp::getUnitSize(_p);
+	if (N > maxN) return false;
 	{
-		const size_t maxN = (maxBitSize + fp::UnitBitSize - 1) / fp::UnitBitSize;
-		N = gmp::getUnitSize(_p);
-		if (N > maxN) return false;
+		bool b;
 		gmp::getArray(&b, p, N, _p);
 		if (!b) return false;
-		mp = _p;
 	}
+	mp = _p;
 	bitSize = gmp::getBitSize(mp);
 	pmod4 = gmp::getUnit(mp, 0) % 4;
 /*
@@ -496,8 +498,11 @@ bool Op::init(const mpz_class& _p, size_t maxBitSize, Mode mode, size_t mclMaxBi
 	}
 #endif
 	if (!fp::initForMont(*this, p, mode)) return false;
-	sq.set(&b, mp);
-	if (!b) return false;
+	{
+		bool b;
+		sq.set(&b, mp);
+		if (!b) return false;
+	}
 	if (N * UnitBitSize <= 256) {
 		hash = sha256;
 	} else {
@@ -643,7 +648,7 @@ int64_t getInt64(bool *pb, fp::Block& b, const fp::Op& op)
 	return 0;
 }
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 	#pragma warning(pop)
 #endif
 

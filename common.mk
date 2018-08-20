@@ -3,6 +3,13 @@ UNAME_S=$(shell uname -s)
 ifeq ($(UNAME_S),Linux)
   OS=Linux
 endif
+ifeq ($(findstring MINGW64,$(UNAME_S)),MINGW64)
+  OS=mingw64
+  CFLAGS+=-D__USE_MINGW_ANSI_STDIO=1
+endif
+ifeq ($(findstring CYGWIN,$(UNAME_S)),CYGWIN)
+  OS=cygwin
+endif
 ifeq ($(UNAME_S),Darwin)
   OS=mac
   ARCH=x86_64
@@ -13,16 +20,12 @@ else
   LIB_SUF=so
 endif
 ARCH?=$(shell uname -m)
-DO_IT=0
-ifeq ($(ARCH),x86_64)
-  DO_IT=1
-endif
-ifeq ($(ARCH),amd64)
-  DO_IT=1
-endif
-ifeq ($(DO_IT),1)
+ifneq ($(findstring $(ARCH),x86_64/amd64),)
   CPU=x86-64
   INTEL=1
+  ifeq ($(findstring $(OS),mingw64/cygwin),)
+    GCC_EXT=1
+  endif
   BIT=64
   BIT_OPT=-m64
   #LOW_ASM_SRC=src/asm/low_x86-64.asm
@@ -44,7 +47,7 @@ ifeq ($(ARCH),aarch64)
   CPU=aarch64
   BIT=64
 endif
-ifneq ($(UNAME_S),Darwin)
+ifeq ($(findstring $(OS),mac/mingw64),)
   LDFLAGS+=-lrt
 endif
 
@@ -54,7 +57,7 @@ MKDIR=mkdir -p
 RM=rm -rf
 
 ifeq ($(DEBUG),1)
-  ifeq ($(INTEL),1)
+  ifeq ($(GCC_EXT),1)
     CFLAGS+=-fsanitize=address
     LDFLAGS+=-fsanitize=address
   endif

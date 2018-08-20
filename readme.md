@@ -90,7 +90,7 @@ git clone git://github.com/herumi/cybozulib_ext ; for only Windows
 # Build and test on x86-64 Linux, macOS, ARM and ARM64 Linux
 To make lib/libmcl.a and test it:
 ```
-cod work/mcl
+cd work/mcl
 make test
 ```
 To benchmark a pairing:
@@ -114,14 +114,19 @@ make ARCH=x86 CFLAGS_USER="-I <lib32>/include" LDFLAGS_USER="-L <lib32>/lib -Wl,
 ```
 
 ## Build for 64-bit Windows
-1) make library
+1) make static library and use it
+
 ```
-mklib.bat
+mklib
+mk -s test\bn_c256_test.cpp
+bin\bn_c256_test.exe
 ```
-2) make exe binary of sample\pairing.cpp
+2) make dynamic library and use it
+
 ```
-mk sample\pairing.cpp
-bin/bn_test.exe
+mklib dll
+mk -d test\bn_c256_test.cpp
+bin\bn_c256_test.exe
 ```
 
 open mcl.sln and build or if you have msbuild.exe
@@ -302,6 +307,8 @@ make MCL_USE_LLVM=1 LLVM_VER=<llvm-version> UPDATE_ASM=1 MCL_MAX_BIT_SIZE=1024
 ```
 
 # API for Two level homomorphic encryption
+* [_Efficient Two-level Homomorphic Encryption in Prime-order Bilinear Groups and A Fast Implementation in WebAssembly_](https://dl.acm.org/citation.cfm?doid=3196494.3196552), N. Attrapadung, G. Hanaoka, S. Mitsunari, Y. Sakai,
+K. Shimizu, and T. Teruya. ASIACCS 2018
 * [she-api](https://github.com/herumi/mcl/blob/master/misc/she/she-api.md)
 * [she-api(Japanese)](https://github.com/herumi/mcl/blob/master/misc/she/she-api-ja.md)
 

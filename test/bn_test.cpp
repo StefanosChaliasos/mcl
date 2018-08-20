@@ -213,7 +213,7 @@ void testFp12pow(const G1& P, const G2& Q)
 
 void testMillerLoop2(const G1& P1, const G2& Q1)
 {
-	Fp12 e1, e2;
+	Fp12 e1, e2, e3;
 	mpz_class c1("12342342423442");
 	mpz_class c2("329428049820348209482");
 	G2 Q2;
@@ -228,8 +228,22 @@ void testMillerLoop2(const G1& P1, const G2& Q1)
 	precomputeG2(Q1coeff, Q1);
 	precomputeG2(Q2coeff, Q2);
 	precomputedMillerLoop2(e2, P1, Q1coeff, P2, Q2coeff);
+	precomputedMillerLoop2mixed(e3, P1, Q1, P2, Q2coeff);
+	CYBOZU_TEST_EQUAL(e2, e3);
 	finalExp(e2, e2);
 	CYBOZU_TEST_EQUAL(e1, e2);
+
+	// special value
+	G2 Z;
+	Z.clear();
+	Q2 += Q2;
+	precomputeG2(Q1coeff, Z);
+	precomputeG2(Q2coeff, Q2);
+	precomputedMillerLoop2(e2, P1, Q1coeff, P2, Q2coeff);
+	precomputedMillerLoop2mixed(e3, P1, Z, P2, Q2coeff);
+	finalExp(e2, e2);
+	finalExp(e3, e3);
+	CYBOZU_TEST_EQUAL(e2, e3);
 }
 
 void testPairing(const G1& P, const G2& Q, const char *eStr)

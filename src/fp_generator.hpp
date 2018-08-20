@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <cybozu/exception.hpp>
+#include <cybozu/array.hpp>
 
 #ifdef _MSC_VER
 	#pragma warning(push)
@@ -125,30 +126,82 @@ if (rm.isReg()) { \
 
 namespace fp {
 
-struct FpGenerator : Xbyak::CodeGenerator {
+struct Code : Xbyak::CodeGenerator {
 	typedef Xbyak::RegExp RegExp;
 	typedef Xbyak::Reg64 Reg64;
 	typedef Xbyak::Xmm Xmm;
 	typedef Xbyak::Operand Operand;
+	typedef Xbyak::Label Label;
 	typedef Xbyak::util::StackFrame StackFrame;
 	typedef Xbyak::util::Pack Pack;
 	typedef fp_gen_local::MixPack MixPack;
 	typedef fp_gen_local::MemReg MemReg;
 	static const int UseRDX = Xbyak::util::UseRDX;
 	static const int UseRCX = Xbyak::util::UseRCX;
+	/*
+		classes to calculate offset and size
+	*/
+	struct Ext1 {
+		Ext1(int FpByte, const Reg64& r, int n = 0)
+			: r_(r)
+			, n_(n)
+			, next(FpByte + n)
+		{
+		}
+		operator RegExp() const { return r_ + n_; }
+		const Reg64& r_;
+		const int n_;
+		const int next;
+	private:
+		Ext1(const Ext1&);
+		void operator=(const Ext1&);
+	};
+	struct Ext2 {
+		Ext2(int FpByte, const Reg64& r, int n = 0)
+			: r_(r)
+			, n_(n)
+			, next(FpByte * 2 + n)
+			, a(FpByte, r, n)
+			, b(FpByte, r, n + FpByte)
+		{
+		}
+		operator RegExp() const { return r_ + n_; }
+		const Reg64& r_;
+		const int n_;
+		const int next;
+		Ext1 a;
+		Ext1 b;
+	private:
+		Ext2(const Ext2&);
+		void operator=(const Ext2&);
+	};
 	Xbyak::util::Cpu cpu_;
 	bool useMulx_;
 	bool  useAdx_;
+	const Reg64& gp0;
+	const Reg64& gp1;
+	const Reg64& gp2;
+	const Reg64& gt0;
+	const Reg64& gt1;
+	const Reg64& gt2;
+	const Reg64& gt3;
+	const Reg64& gt4;
+	const Reg64& gt5;
+	const Reg64& gt6;
+	const Reg64& gt7;
+	const Reg64& gt8;
+	const Reg64& gt9;
 	const mcl::fp::Op *op_;
 	const uint64_t *p_;
 	uint64_t rp_;
 	int pn_;
+	int FpByte_;
 	bool isFullBit_;
 	// add/sub without carry. return true if overflow
 	typedef bool (*bool3op)(uint64_t*, const uint64_t*, const uint64_t*);
 
 	// add/sub with mod
-	typedef void (*void3op)(uint64_t*, const uint64_t*, const uint64_t*);
+//	typedef void (*void3op)(uint64_t*, const uint64_t*, const uint64_t*);
 
 	// mul without carry. return top of z
 	typedef uint64_t (*uint3opI)(uint64_t*, const uint64_t*, uint64_t);
@@ -160,13 +213,41 @@ struct FpGenerator : Xbyak::CodeGenerator {
 	typedef int (*int2op)(uint64_t*, const uint64_t*);
 	void4u mul_;
 	uint3opI mulUnit_;
-	FpGenerator()
-		: CodeGenerator(4096 * 8)
+	// the following labels assume sf(this, 3, 10 | UseRDX)
+	Label mulPreL_;
+	Label fpDbl_modL_;
+	Label fp_mulL_;
+
+	Code(uint8_t *mem, size_t codeSize)
+		: CodeGenerator(codeSize, mem)
+#ifdef XBYAK64_WIN
+		, gp0(rcx)
+		, gp1(r11)
+		, gp2(r8)
+		, gt0(r9)
+		, gt1(r10)
+		, gt2(rdi)
+		, gt3(rsi)
+#else
+		, gp0(rdi)
+		, gp1(rsi)
+		, gp2(r11)
+		, gt0(rcx)
+		, gt1(r8)
+		, gt2(r9)
+		, gt3(r10)
+#endif
+		, gt4(rbx)
+		, gt5(rbp)
+		, gt6(r12)
+		, gt7(r13)
+		, gt8(r14)
+		, gt9(r15)
 		, op_(0)
 		, p_(0)
 		, rp_(0)
 		, pn_(0)
-		, isFullBit_(0)
+		, FpByte_(0)
 		, mul_(0)
 		, mulUnit_(0)
 	{
@@ -182,15 +263,18 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		p_ = op.p;
 		rp_ = fp::getMontgomeryCoeff(p_[0]);
 		pn_ = (int)op.N;
-		isFullBit_ = (p_[pn_ - 1] >> 63) != 0;
+		FpByte_ = int(op.maxN * sizeof(uint64_t));
+		isFullBit_ = op.isFullBit;
 //		printf("p=%p, pn_=%d, isFullBit_=%d\n", p_, pn_, isFullBit_);
 
 		setSize(0); // reset code
 		align(16);
 		op.fp_add = getCurr<void4u>();
+		op.fp_addA_ = getCurr<void3u>();
 		gen_fp_add();
 		align(16);
 		op.fp_sub = getCurr<void4u>();
+		op.fp_subA_ = getCurr<void3u>();
 		gen_fp_sub();
 
 		align(16);
@@ -204,25 +288,19 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		gen_shr1();
 
 		align(16);
-		op.fp_neg = getCurr<void3u>();
-		gen_neg();
+		op.fp_negA_ = getCurr<void2u>();
+		gen_fp_neg();
 
 		align(16);
 		mulUnit_ = getCurr<uint3opI>();
 		gen_mulUnit();
-		if (op.primeMode == PM_NIST_P521) {
-			align(16);
-			op.fpDbl_mod = getCurr<void3u>();
-			gen_fpDbl_mod(op);
-		} else {
-			align(16);
-			mul_ = getCurr<void4u>();
-			op.fp_mul = mul_;
-			gen_mul();
-			align(16);
-			op.fp_sqr = getCurr<void3u>();
-			gen_sqr();
-		}
+		align(16);
+		op.fp_mul = getCurr<void4u>(); // used in toMont/fromMont
+		op.fp_mulA_ = getCurr<void3u>();
+		gen_mul();
+		align(16);
+		op.fp_sqrA_ = getCurr<void2u>();
+		gen_sqr();
 		if (op.primeMode != PM_NIST_P192 && op.N <= 4) { // support general op.N but not fast for op.N > 4
 			align(16);
 			op.fp_preInv = getCurr<int2u>();
@@ -251,17 +329,63 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		if (op.N == 2 || op.N == 3 || op.N == 4) {
 			align(16);
 			op.fpDbl_mod = getCurr<void3u>();
-			gen_fpDbl_mod(op);
+			if (op.N == 4) {
+				StackFrame sf(this, 3, 10 | UseRDX, 0, false);
+				call(fpDbl_modL_);
+				sf.close();
+			L(fpDbl_modL_);
+				gen_fpDbl_mod4(gp0, gp1, sf.t, gp2);
+				ret();
+			} else {
+				gen_fpDbl_mod(op);
+			}
 		}
 		if ((useMulx_ && op.N == 2) || op.N == 3 || op.N == 4 || (useAdx_ && op.N == 6)) {
 			align(16);
 			op.fpDbl_mulPre = getCurr<void3u>();
-			gen_fpDbl_mulPre();
+			if (op.N == 4) {
+				/*
+					fpDbl_mulPre is available as C function
+					this function calls mulPreL_ directly.
+				*/
+				StackFrame sf(this, 3, 10 | UseRDX, 0, false);
+#if 0
+				call(mulPreL_);
+#else
+				mulPre4(gp0, gp1, gp2, sf.t);
+#endif
+				sf.close(); // make epilog
+			L(mulPreL_); // called only from asm code
+				mulPre4(gp0, gp1, gp2, sf.t);
+				ret();
+			} else {
+				gen_fpDbl_mulPre();
+			}
 		}
 		if ((useMulx_ && op.N == 2) || op.N == 3 || op.N == 4) {
 			align(16);
 			op.fpDbl_sqrPre = getCurr<void2u>();
 			gen_fpDbl_sqrPre(op);
+		}
+		if (op.N == 4 && !isFullBit_) {
+			align(16);
+			op.fp2_addA_ = getCurr<void3u>();
+			gen_fp2_add4();
+			align(16);
+			op.fp2_subA_ = getCurr<void3u>();
+			gen_fp2_sub4();
+			align(16);
+			op.fp2_negA_ = getCurr<void2u>();
+			gen_fp2_neg4();
+			align(16);
+			op.fp2Dbl_mulPre = getCurr<void3u>();
+			gen_fp2Dbl_mulPre();
+			align(16);
+			op.fp2_mulA_ = getCurr<void3u>();
+			gen_fp2_mul4();
+			align(16);
+			op.fp2_sqrA_ = getCurr<void2u>();
+			gen_fp2_sqr4();
 		}
 	}
 	void gen_addSubPre(bool isAdd, int n)
@@ -303,29 +427,38 @@ struct FpGenerator : Xbyak::CodeGenerator {
 	}
 	/*
 		pz[] = -px[]
+		use rax, rdx
 	*/
-	void gen_raw_neg(const RegExp& pz, const RegExp& px, const Reg64& t0, const Reg64& t1)
+	void gen_raw_neg(const RegExp& pz, const RegExp& px, const Pack& t)
 	{
-		inLocalLabel();
-		mov(t0, ptr [px]);
-		test(t0, t0);
-		jnz(".neg");
-		if (pn_ > 1) {
-			for (int i = 1; i < pn_; i++) {
-				or_(t0, ptr [px + i * 8]);
+		Label nonZero, exit;
+		load_rm(t, px);
+		mov(rax, t[0]);
+		if (t.size() > 1) {
+			for (size_t i = 1; i < t.size(); i++) {
+				or_(rax, t[i]);
 			}
-			jnz(".neg");
+		} else {
+			test(rax, rax);
 		}
-		// zero
-		for (int i = 0; i < pn_; i++) {
-			mov(ptr [pz + i * 8], t0);
+		jnz(nonZero);
+		// rax = 0
+		for (size_t i = 0; i < t.size(); i++) {
+			mov(ptr[pz + i * 8], rax);
 		}
-		jmp(".exit");
-	L(".neg");
-		mov(t1, (size_t)p_);
-		gen_raw_sub(pz, t1, px, t0, pn_);
-	L(".exit");
-		outLocalLabel();
+		jmp(exit);
+	L(nonZero);
+		mov(rax, (size_t)p_);
+		for (size_t i = 0; i < t.size(); i++) {
+			mov(rdx, ptr [rax + i * 8]);
+			if (i == 0) {
+				sub(rdx, t[i]);
+			} else {
+				sbb(rdx, t[i]);
+			}
+			mov(ptr [pz + i * 8], rdx);
+		}
+	L(exit);
 	}
 	/*
 		(rdx:pz[0..n-1]) = px[0..n-1] * y
@@ -575,12 +708,10 @@ struct FpGenerator : Xbyak::CodeGenerator {
 	L(".exit");
 		outLocalLabel();
 	}
-	void gen_neg()
+	void gen_fp_neg()
 	{
-		StackFrame sf(this, 2, 2);
-		const Reg64& pz = sf.p[0];
-		const Reg64& px = sf.p[1];
-		gen_raw_neg(pz, px, sf.t[0], sf.t[1]);
+		StackFrame sf(this, 2, UseRDX | pn_);
+		gen_raw_neg(sf.p[0], sf.p[1], sf.t);
 	}
 	void gen_shr1()
 	{
@@ -614,7 +745,7 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		} else if (pn_ <= 9) {
 			gen_montMulN(p_, rp_, pn_);
 		} else {
-			throw cybozu::Exception("mcl:FpGenerator:gen_mul:not implemented for") << pn_;
+			throw cybozu::Exception("mcl:Code:gen_mul:not implemented for") << pn_;
 		}
 	}
 	/*
@@ -773,23 +904,18 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		@note destroy rax, rdx, t0, ..., t10, xm0, xm1
 		xm2 if isFullBit_
 	*/
-	void gen_fpDbl_mod4()
+	void gen_fpDbl_mod4(const Reg64& z, const Reg64& xy, const Pack& t, const Reg64& t10)
 	{
-		StackFrame sf(this, 3, 10 | UseRDX);
-		const Reg64& z = sf.p[0];
-		const Reg64& xy = sf.p[1];
-
-		const Reg64& t0 = sf.t[0];
-		const Reg64& t1 = sf.t[1];
-		const Reg64& t2 = sf.t[2];
-		const Reg64& t3 = sf.t[3];
-		const Reg64& t4 = sf.t[4];
-		const Reg64& t5 = sf.t[5];
-		const Reg64& t6 = sf.t[6];
-		const Reg64& t7 = sf.t[7];
-		const Reg64& t8 = sf.t[8];
-		const Reg64& t9 = sf.t[9];
-		const Reg64& t10 = sf.p[2];
+		const Reg64& t0 = t[0];
+		const Reg64& t1 = t[1];
+		const Reg64& t2 = t[2];
+		const Reg64& t3 = t[3];
+		const Reg64& t4 = t[4];
+		const Reg64& t5 = t[5];
+		const Reg64& t6 = t[6];
+		const Reg64& t7 = t[7];
+		const Reg64& t8 = t[8];
+		const Reg64& t9 = t[9];
 
 		const Reg64& a = rax;
 		const Reg64& d = rdx;
@@ -895,11 +1021,13 @@ struct FpGenerator : Xbyak::CodeGenerator {
 			fpDbl_mod_NIST_P192(sf.p[0], sf.p[1], sf.t);
 			return;
 		}
+#if 0
 		if (op.primeMode == PM_NIST_P521) {
 			StackFrame sf(this, 2, 8 | UseRDX);
 			fpDbl_mod_NIST_P521(sf.p[0], sf.p[1], sf.t);
 			return;
 		}
+#endif
 		switch (pn_) {
 		case 2:
 			gen_fpDbl_mod2();
@@ -907,9 +1035,14 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		case 3:
 			gen_fpDbl_mod3();
 			break;
+#if 0
 		case 4:
-			gen_fpDbl_mod4();
+			{
+				StackFrame sf(this, 3, 10 | UseRDX);
+				gen_fpDbl_mod4(gp0, gp1, sf.t, gp2);
+			}
 			break;
+#endif
 		default:
 			throw cybozu::Exception("gen_fpDbl_mod:not support") << pn_;
 		}
@@ -931,7 +1064,7 @@ struct FpGenerator : Xbyak::CodeGenerator {
 #else
 		mov(rdx, rsi);
 #endif
-		jmp((void*)mul_);
+		jmp((const void*)op_->fp_mulA_);
 	}
 	/*
 		input (pz[], px[], py[])
@@ -978,7 +1111,9 @@ struct FpGenerator : Xbyak::CodeGenerator {
 	*/
 	void gen_montMul4(const uint64_t *p, uint64_t pp)
 	{
-		StackFrame sf(this, 3, 10 | UseRDX);
+		StackFrame sf(this, 3, 10 | UseRDX, 0, false);
+		call(fp_mulL_);
+		sf.close();
 		const Reg64& p0 = sf.p[0];
 		const Reg64& p1 = sf.p[1];
 		const Reg64& p2 = sf.p[2];
@@ -994,6 +1129,7 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		const Reg64& t8 = sf.t[8];
 		const Reg64& t9 = sf.t[9];
 
+	L(fp_mulL_);
 		movq(xm0, p0); // save p0
 		mov(p0, (uint64_t)p);
 		movq(xm1, p2);
@@ -1026,6 +1162,7 @@ struct FpGenerator : Xbyak::CodeGenerator {
 
 		movq(p0, xm0); // load p0
 		store_mr(p0, Pack(t3, t2, t1, t0));
+		ret();
 	}
 	/*
 		input (z, x, y) = (p0, p1, p2)
@@ -1612,18 +1749,27 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		if (useMulx_ && pn_ == 2) {
 			StackFrame sf(this, 3, 5 | UseRDX);
 			mulPre2(sf.p[0], sf.p[1], sf.p[2], sf.t);
-		} else if (pn_ == 3) {
+			return;
+		}
+		if (pn_ == 3) {
 			StackFrame sf(this, 3, 10 | UseRDX);
 			mulPre3(sf.p[0], sf.p[1], sf.p[2], sf.t);
-		} else if (pn_ == 4) {
+			return;
+		}
+		assert(0);
+#if 1
+		if (pn_ == 4) {
 			StackFrame sf(this, 3, 10 | UseRDX);
 			mulPre4(sf.p[0], sf.p[1], sf.p[2], sf.t);
+			return;
+		}
+#endif
 #if 0 // slow?
-		} else if (pn_ == 6 && useAdx_) {
+		if (pn_ == 6 && useAdx_) {
 			StackFrame sf(this, 3, 7 | UseRDX);
 			mulPre6(sf.p[0], sf.p[1], sf.p[2], sf.t);
-#endif
 		}
+#endif
 	}
 	static inline void debug_put_inner(const uint64_t *ptr, int n)
 	{
@@ -1856,7 +2002,7 @@ struct FpGenerator : Xbyak::CodeGenerator {
 		assert(pn_ >= 1);
 		const int freeRegNum = 13;
 		if (pn_ > 9) {
-			throw cybozu::Exception("mcl:FpGenerator:gen_preInv:large pn_") << pn_;
+			throw cybozu::Exception("mcl:Code:gen_preInv:large pn_") << pn_;
 		}
 		StackFrame sf(this, 2, 10 | UseRDX | UseRCX, (std::max<int>(0, pn_ * 5 - freeRegNum) + 1 + (isFullBit_ ? 1 : 0)) * 8);
 		const Reg64& pr = sf.p[0];
@@ -2130,8 +2276,8 @@ struct FpGenerator : Xbyak::CodeGenerator {
 	L("@@");
 	}
 private:
-	FpGenerator(const FpGenerator&);
-	void operator=(const FpGenerator&);
+	Code(const Code&);
+	void operator=(const Code&);
 	void make_op_rm(void (Xbyak::CodeGenerator::*op)(const Xbyak::Operand&, const Xbyak::Operand&), const Reg64& op1, const MemReg& op2)
 	{
 		if (op2.isReg()) {
@@ -2659,11 +2805,227 @@ private:
 			}
 		}
 	}
+	void gen_fp2Dbl_mulPre()
+	{
+		assert(!isFullBit_);
+		const RegExp z = rsp + 0 * 8;
+		const RegExp x = rsp + 1 * 8;
+		const RegExp y = rsp + 2 * 8;
+		const Ext1 s(FpByte_, rsp, 3 * 8);
+		const Ext1 t(FpByte_, rsp, s.next);
+		const Ext1 d2(FpByte_ * 2, rsp, t.next);
+		const int SS = d2.next;
+		StackFrame sf(this, 3, 10 | UseRDX, SS);
+		mov(ptr [z], gp0);
+		mov(ptr [x], gp1);
+		mov(ptr [y], gp2);
+		// s = a + b
+		gen_raw_add(s, gp1, gp1 + FpByte_, rax, 4);
+		// t = c + d
+		gen_raw_add(t, gp2, gp2 + FpByte_, rax, 4);
+		// d1 = (a + b)(c + d)
+		mov(gp0, ptr [z]);
+		add(gp0, FpByte_ * 2); // d1
+		lea(gp1, ptr [s]);
+		lea(gp2, ptr [t]);
+		call(mulPreL_);
+		// d0 = a c
+		mov(gp0, ptr [z]);
+		mov(gp1, ptr [x]);
+		mov(gp2, ptr [y]);
+		call(mulPreL_);
+
+		// d2 = b d
+		lea(gp0, ptr [d2]);
+		mov(gp1, ptr [x]);
+		add(gp1, FpByte_);
+		mov(gp2, ptr [y]);
+		add(gp2, FpByte_);
+		call(mulPreL_);
+
+		mov(gp0, ptr [z]);
+		add(gp0, FpByte_ * 2); // d1
+		mov(gp1, gp0);
+		mov(gp2, ptr [z]);
+		gen_raw_sub(gp0, gp1, gp2, rax, 8);
+		lea(gp2, ptr [d2]);
+		gen_raw_sub(gp0, gp1, gp2, rax, 8);
+
+		mov(gp0, ptr [z]);
+		mov(gp1, gp0);
+		lea(gp2, ptr [d2]);
+
+		gen_raw_sub(gp0, gp1, gp2, rax, 4);
+		gen_raw_fp_sub(gp0 + 8 * 4, gp1 + 8 * 4, gp2 + 8 * 4, Pack(gt0, gt1, gt2, gt3, gt4, gt5, gt6, gt7), true);
+	}
+
+	void gen_fp2_add4()
+	{
+		assert(!isFullBit_);
+		StackFrame sf(this, 3, 8);
+		gen_raw_fp_add(sf.p[0], sf.p[1], sf.p[2], sf.t, false);
+		gen_raw_fp_add(sf.p[0] + FpByte_, sf.p[1] + FpByte_, sf.p[2] + FpByte_, sf.t, false);
+	}
+	void gen_fp2_sub4()
+	{
+		assert(!isFullBit_);
+		StackFrame sf(this, 3, 8);
+		gen_raw_fp_sub(sf.p[0], sf.p[1], sf.p[2], sf.t, false);
+		gen_raw_fp_sub(sf.p[0] + FpByte_, sf.p[1] + FpByte_, sf.p[2] + FpByte_, sf.t, false);
+	}
+	void gen_fp2_neg4()
+	{
+		assert(!isFullBit_);
+		StackFrame sf(this, 2, UseRDX | pn_);
+		gen_raw_neg(sf.p[0], sf.p[1], sf.t);
+		gen_raw_neg(sf.p[0] + FpByte_, sf.p[1] + FpByte_, sf.t);
+	}
+	void gen_fp2_mul4()
+	{
+		assert(!isFullBit_);
+		const RegExp z = rsp + 0 * 8;
+		const RegExp x = rsp + 1 * 8;
+		const RegExp y = rsp + 2 * 8;
+		const Ext1 s(FpByte_, rsp, 3 * 8);
+		const Ext1 t(FpByte_, rsp, s.next);
+		const Ext1 d0(FpByte_ * 2, rsp, t.next);
+		const Ext1 d1(FpByte_ * 2, rsp, d0.next);
+		const Ext1 d2(FpByte_ * 2, rsp, d1.next);
+		const int SS = d2.next;
+		StackFrame sf(this, 3, 10 | UseRDX, SS);
+		mov(ptr[z], gp0);
+		mov(ptr[x], gp1);
+		mov(ptr[y], gp2);
+		// s = a + b
+		gen_raw_add(s, gp1, gp1 + FpByte_, rax, 4);
+		// t = c + d
+		gen_raw_add(t, gp2, gp2 + FpByte_, rax, 4);
+		// d1 = (a + b)(c + d)
+		mulPre4(d1, s, t, sf.t);
+		// d0 = a c
+		mov(gp1, ptr [x]);
+		mov(gp2, ptr [y]);
+		mulPre4(d0, gp1, gp2, sf.t);
+		// d2 = b d
+		mov(gp1, ptr [x]);
+		add(gp1, FpByte_);
+		mov(gp2, ptr [y]);
+		add(gp2, FpByte_);
+		mulPre4(d2, gp1, gp2, sf.t);
+
+		gen_raw_sub(d1, d1, d0, rax, 8);
+		gen_raw_sub(d1, d1, d2, rax, 8);
+
+		gen_raw_sub(d0, d0, d2, rax, 4);
+		gen_raw_fp_sub((RegExp)d0 + 8 * 4, (RegExp)d0 + 8 * 4, (RegExp)d2 + 8 * 4, Pack(gt0, gt1, gt2, gt3, gt4, gt5, gt6, gt7), true);
+
+		mov(gp0, ptr [z]);
+		lea(gp1, ptr[d0]);
+		call(fpDbl_modL_);
+
+		mov(gp0, ptr [z]);
+		add(gp0, FpByte_);
+		lea(gp1, ptr[d1]);
+		call(fpDbl_modL_);
+	}
+	void gen_fp2_sqr4()
+	{
+		assert(!isFullBit_);
+		const RegExp y = rsp + 0 * 8;
+		const RegExp x = rsp + 1 * 8;
+		const Ext1 t1(FpByte_, rsp, 2 * 8);
+		const Ext1 t2(FpByte_, rsp, t1.next);
+		const Ext1 t3(FpByte_, rsp, t2.next);
+		bool nocarry = (p_[pn_ - 1] >> 62) == 0;
+		StackFrame sf(this, 3, 10 | UseRDX, t3.next);
+		mov(ptr [y], gp0);
+		mov(ptr [x], gp1);
+		// t1 = b + b
+		lea(gp0, ptr [t1]);
+		if (nocarry) {
+			for (int i = 0; i < 4; i++) {
+				mov(rax, ptr [gp1 + FpByte_ + i * 8]);
+				if (i == 0) {
+					add(rax, rax);
+				} else {
+					adc(rax, rax);
+				}
+				mov(ptr [gp0 + i * 8], rax);
+			}
+		} else {
+			gen_raw_fp_add(gp0, gp1 + FpByte_, gp1 + FpByte_, sf.t, false);
+		}
+		// t1 = 2ab
+		mov(gp1, gp0);
+		mov(gp2, ptr [x]);
+		call(fp_mulL_);
+
+		if (nocarry) {
+			Pack a = sf.t.sub(0, 4);
+			Pack b = sf.t.sub(4, 4);
+			mov(gp0, ptr [x]);
+			load_rm(a, gp0);
+			load_rm(b, gp0 + FpByte_);
+			// t2 = a + b
+			for (int i = 0; i < 4; i++) {
+				mov(rax, a[i]);
+				if (i == 0) {
+					add(rax, b[i]);
+				} else {
+					adc(rax, b[i]);
+				}
+				mov(ptr [(RegExp)t2 + i * 8], rax);
+			}
+			// t3 = a + p - b
+			mov(gp1, (size_t)p_);
+			add_rm(a, gp1);
+			sub_rr(a, b);
+			store_mr(t3, a);
+		} else {
+			mov(gp0, ptr [x]);
+			gen_raw_fp_add(t2, gp0, gp0 + FpByte_, sf.t, false);
+			gen_raw_fp_sub(t3, gp0, gp0 + FpByte_, sf.t, false);
+		}
+
+		mov(gp0, ptr [y]);
+		lea(gp1, ptr [t2]);
+		lea(gp2, ptr [t3]);
+		call(fp_mulL_);
+		mov(gp0, ptr [y]);
+		for (int i = 0; i < 4; i++) {
+			mov(rax, ptr [(RegExp)t1 + i * 8]);
+			mov(ptr [gp0 + FpByte_ + i * 8], rax);
+		}
+	}
+};
+
+struct FpGenerator {
+	static const size_t codeSize = 4096 * 8;
+	static const size_t pageSize = 4096;
+	uint8_t *mem;
+	Code code;
+	FpGenerator()
+		: mem((uint8_t*)cybozu::AlignedMalloc(codeSize, pageSize))
+		, code(mem, codeSize)
+	{
+	}
+	void init(Op& op)
+	{
+		code.init(op);
+		if (!Xbyak::CodeArray::protect(mem, codeSize, Xbyak::CodeArray::PROTECT_RE)) {
+			throw cybozu::Exception("err protect read/exec");
+		}
+	}
+	~FpGenerator()
+	{
+		Xbyak::CodeArray::protect(mem, codeSize, Xbyak::CodeArray::PROTECT_RW);
+		cybozu::AlignedFree(mem);
+	}
 };
 
 } } // mcl::fp
 
-#ifdef _WIN32
+#ifdef _MSC_VER
 	#pragma warning(pop)
 #endif
 

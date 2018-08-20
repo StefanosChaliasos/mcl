@@ -13,7 +13,7 @@
 #ifndef MCL_MAX_BIT_SIZE
 	#define MCL_MAX_BIT_SIZE 521
 #endif
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || defined(__wasm__)
 	#define MCL_DONT_USE_XBYAK
 	#define MCL_DONT_USE_OPENSSL
 #endif
@@ -22,10 +22,6 @@
 #endif
 
 #define MCL_MAX_HASH_BIT_SIZE 512
-
-#if CYBOZU_CPP_VERSION >= CYBOZU_CPP_VERSION_CPP11
-#include <random>
-#endif
 
 namespace mcl {
 
@@ -167,7 +163,6 @@ struct Op {
 	mpz_class mp;
 	uint32_t pmod4;
 	mcl::SquareRoot sq;
-	FpGenerator *fg;
 	Unit half[maxUnitSize]; // (p + 1) / 2
 	Unit oneRep[maxUnitSize]; // 1(=inv R if Montgomery)
 	/*
@@ -180,7 +175,21 @@ struct Op {
 	Unit one[maxUnitSize];
 	Unit R2[maxUnitSize];
 	Unit R3[maxUnitSize];
+#ifdef MCL_USE_XBYAK
+	FpGenerator *fg;
 	mcl::Array<Unit> invTbl;
+#endif
+	void3u fp_addA_;
+	void3u fp_subA_;
+	void2u fp_negA_;
+	void3u fp_mulA_;
+	void2u fp_sqrA_;
+	void3u fp2_addA_;
+	void3u fp2_subA_;
+	void2u fp2_negA_;
+	void3u fp2_mulA_;
+	void2u fp2_sqrA_;
+	size_t maxN;
 	size_t N;
 	size_t bitSize;
 	bool (*fp_isZero)(const Unit*);
@@ -209,18 +218,14 @@ struct Op {
 	u3u fp_subPre; // without modulo p
 	u3u fpDbl_addPre;
 	u3u fpDbl_subPre;
+	void3u fp2Dbl_mulPre;
 	/*
 		for Fp2 = F[u] / (u^2 + 1)
 		x = a + bu
 	*/
 	int xi_a; // xi = xi_a + u
-	void3u fp2_add;
-	void3u fp2_sub;
-	void3u fp2_mul;
 	void4u fp2_mulNF;
-	void2u fp2_neg;
 	void2u fp2_inv;
-	void2u fp2_sqr;
 	void2u fp2_mul_xi;
 	uint32_t (*hash)(void *out, uint32_t maxOutSize, const void *msg, uint32_t msgSize);
 
@@ -232,11 +237,12 @@ struct Op {
 	Op()
 	{
 		clear();
-		fg = 0;
 	}
 	~Op()
 	{
+#ifdef MCL_USE_XBYAK
 		destroyFpGenerator(fg);
+#endif
 	}
 	void clear()
 	{
@@ -251,7 +257,21 @@ struct Op {
 		memset(one, 0, sizeof(one));
 		memset(R2, 0, sizeof(R2));
 		memset(R3, 0, sizeof(R3));
+#ifdef MCL_USE_XBYAK
+		fg = 0;
 		invTbl.clear();
+#endif
+		fp_addA_ = 0;
+		fp_subA_ = 0;
+		fp_negA_ = 0;
+		fp_mulA_ = 0;
+		fp_sqrA_ = 0;
+		fp2_addA_ = 0;
+		fp2_subA_ = 0;
+		fp2_negA_ = 0;
+		fp2_mulA_ = 0;
+		fp2_sqrA_ = 0;
+		maxN = 0;
 		N = 0;
 		bitSize = 0;
 		fp_isZero = 0;
@@ -280,15 +300,11 @@ struct Op {
 		fp_subPre = 0;
 		fpDbl_addPre = 0;
 		fpDbl_subPre = 0;
+		fp2Dbl_mulPre = 0;
 
 		xi_a = 0;
-		fp2_add = 0;
-		fp2_sub = 0;
-		fp2_mul = 0;
 		fp2_mulNF = 0;
-		fp2_neg = 0;
 		fp2_inv = 0;
-		fp2_sqr = 0;
 		fp2_mul_xi = 0;
 
 		primeMode = PM_GENERIC;
@@ -314,8 +330,10 @@ struct Op {
 	}
 	bool init(const mpz_class& p, size_t maxBitSize, Mode mode, size_t mclMaxBitSize = MCL_MAX_BIT_SIZE);
 	void initFp2(int xi_a);
+#ifdef MCL_USE_XBYAK
 	static FpGenerator* createFpGenerator();
 	static void destroyFpGenerator(FpGenerator *fg);
+#endif
 private:
 	Op(const Op&);
 	void operator=(const Op&);

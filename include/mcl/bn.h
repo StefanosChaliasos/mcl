@@ -15,22 +15,28 @@
 
 
 #if defined(_MSC_VER)
-	#ifdef MCLBN_DLL_EXPORT
-		#define MCLBN_DLL_API __declspec(dllexport)
+	#ifdef MCLBN_DONT_EXPORT
+		#define MCLBN_DLL_API
 	#else
-		#define MCLBN_DLL_API __declspec(dllimport)
-		#ifndef MCLBN_NO_AUTOLINK
-			#if MCLBN_FP_UNIT_SIZE == 4
-				#pragma comment(lib, "mclbn256.lib")
-			#elif MCLBN_FP_UNIT_SIZE == 6
-				#pragma comment(lib, "mclbn384.lib")
-			#else
-				#pragma comment(lib, "mclbn512.lib")
-			#endif
+		#ifdef MCLBN_DLL_EXPORT
+			#define MCLBN_DLL_API __declspec(dllexport)
+		#else
+			#define MCLBN_DLL_API __declspec(dllimport)
+		#endif
+	#endif
+	#ifndef MCLBN_NO_AUTOLINK
+		#if MCLBN_FP_UNIT_SIZE == 4
+			#pragma comment(lib, "mclbn256.lib")
+		#elif MCLBN_FP_UNIT_SIZE == 6
+			#pragma comment(lib, "mclbn384.lib")
+		#else
+			#pragma comment(lib, "mclbn512.lib")
 		#endif
 	#endif
 #elif defined(__EMSCRIPTEN__) && !defined(MCLBN_DONT_EXPORT)
 	#define MCLBN_DLL_API __attribute__((used))
+#elif defined(__wasm__) && !defined(MCLBN_DONT_EXPORT)
+	#define MCLBN_DLL_API __attribute__((visibility("default")))
 #else
 	#define MCLBN_DLL_API
 #endif
@@ -118,16 +124,16 @@ MCLBN_DLL_API int mclBn_init(int curve, int maxUnitSize);
 /*
 	return the num of Unit(=uint64_t) to store Fr
 */
-MCLBN_DLL_API int mclBn_getOpUnitSize();
+MCLBN_DLL_API int mclBn_getOpUnitSize(void);
 
 /*
 	return bytes for serialized G1(=Fp)
 */
-MCLBN_DLL_API int mclBn_getG1ByteSize();
+MCLBN_DLL_API int mclBn_getG1ByteSize(void);
 /*
 	return bytes for serialized Fr
 */
-MCLBN_DLL_API int mclBn_getFrByteSize();
+MCLBN_DLL_API int mclBn_getFrByteSize(void);
 
 /*
 	return decimal string of the order of the curve(=the characteristic of Fr)
@@ -306,6 +312,7 @@ MCLBN_DLL_API void mclBn_precomputeG2(uint64_t *Qbuf, const mclBnG2 *Q);
 
 MCLBN_DLL_API void mclBn_precomputedMillerLoop(mclBnGT *f, const mclBnG1 *P, const uint64_t *Qbuf);
 MCLBN_DLL_API void mclBn_precomputedMillerLoop2(mclBnGT *f, const mclBnG1 *P1, const uint64_t *Q1buf, const mclBnG1 *P2, const uint64_t *Q2buf);
+MCLBN_DLL_API void mclBn_precomputedMillerLoop2mixed(mclBnGT *f, const mclBnG1 *P1, const mclBnG2 *Q1, const mclBnG1 *P2, const uint64_t *Q2buf);
 
 /*
 	Lagrange interpolation

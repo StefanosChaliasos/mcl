@@ -15,6 +15,7 @@ ifeq ($(CPU),x86-64)
     TEST_SRC+=low_test.cpp
   endif
   ifeq ($(MCL_USE_XBYAK),1)
+    CFLAGS+=-DMCL_XBYAK_DIRECT_CALL
     TEST_SRC+=fp_generator_test.cpp
   endif
 endif
@@ -74,10 +75,18 @@ SHE256_OBJ=$(OBJ_DIR)/she_c256.o
 SHE384_OBJ=$(OBJ_DIR)/she_c384.o
 ECDSA_OBJ=$(OBJ_DIR)/ecdsa_c.o
 FUNC_LIST=src/func.list
-MCL_USE_LLVM?=1
+ifeq ($(findstring $(OS),mingw64/cygwin),)
+  MCL_USE_LLVM?=1
+else
+  MCL_USE_LLVM=0
+endif
 ifeq ($(MCL_USE_LLVM),1)
   CFLAGS+=-DMCL_USE_LLVM=1
   LIB_OBJ+=$(ASM_OBJ)
+  # special case for intel with bmi2
+  ifeq ($(INTEL),1)
+    LIB_OBJ+=$(OBJ_DIR)/$(CPU).bmi2.o
+  endif
 endif
 LLVM_SRC=src/base$(BIT).ll
 
@@ -95,10 +104,6 @@ ifeq ($(USE_LOW_ASM),1)
   LOW_ASM_OBJ=$(LOW_ASM_SRC:.asm=.o)
   LIB_OBJ+=$(LOW_ASM_OBJ)
 endif
-# special case for intel with bmi2
-ifeq ($(INTEL),1)
-  LIB_OBJ+=$(OBJ_DIR)/$(CPU).bmi2.o
-endif
 
 ifeq ($(UPDATE_ASM),1)
   ASM_SRC_DEP=$(LLVM_SRC)
@@ -108,11 +113,23 @@ else
   ASM_BMI2_SRC_DEP=
 endif
 
+ifneq ($(findstring $(OS),mac/mingw64),)
+  BN256_SLIB_LDFLAGS+=-l$(MCL_SNAME) -L./lib
+  BN384_SLIB_LDFLAGS+=-l$(MCL_SNAME) -L./lib
+  BN512_SLIB_LDFLAGS+=-l$(MCL_SNAME) -L./lib
+endif
+ifeq ($(OS),mingw64)
+  MCL_SLIB_LDFLAGS+=-Wl,--out-implib,$(LIB_DIR)/lib$(MCL_SNAME).a
+  BN256_SLIB_LDFLAGS+=-Wl,--out-implib,$(LIB_DIR)/lib$(BN256_SNAME).a
+  BN384_SLIB_LDFLAGS+=-Wl,--out-implib,$(LIB_DIR)/lib$(BN384_SNAME).a
+  BN512_SLIB_LDFLAGS+=-Wl,--out-implib,$(LIB_DIR)/lib$(BN512_SNAME).a
+endif
+
 $(MCL_LIB): $(LIB_OBJ)
 	$(AR) $@ $(LIB_OBJ)
 
 $(MCL_SLIB): $(LIB_OBJ)
-	$(PRE)$(CXX) -o $@ $(LIB_OBJ) -shared $(LDFLAGS)
+	$(PRE)$(CXX) -o $@ $(LIB_OBJ) -shared $(LDFLAGS) $(MCL_SLIB_LDFLAGS)
 
 $(BN256_LIB): $(BN256_OBJ)
 	$(AR) $@ $(BN256_OBJ)
@@ -126,11 +143,8 @@ $(SHE384_LIB): $(SHE384_OBJ)
 $(ECDSA_LIB): $(ECDSA_OBJ)
 	$(AR) $@ $(ECDSA_OBJ)
 
-ifeq ($(OS),mac)
-  MAC_LDFLAGS+=-l$(MCL_SNAME) -L./lib
-endif
 $(BN256_SLIB): $(BN256_OBJ) $(MCL_SLIB)
-	$(PRE)$(CXX) -o $@ $(BN256_OBJ) -shared $(LDFLAGS) $(MAC_LDFLAGS)
+	$(PRE)$(CXX) -o $@ $(BN256_OBJ) -shared $(LDFLAGS) $(BN256_SLIB_LDFLAGS)
 
 $(BN384_LIB): $(BN384_OBJ)
 	$(AR) $@ $(BN384_OBJ)
@@ -139,10 +153,10 @@ $(BN512_LIB): $(BN512_OBJ)
 	$(AR) $@ $(BN512_OBJ)
 
 $(BN384_SLIB): $(BN384_OBJ) $(MCL_SLIB)
-	$(PRE)$(CXX) -o $@ $(BN384_OBJ) -shared $(LDFLAGS) $(MAC_LDFLAGS)
+	$(PRE)$(CXX) -o $@ $(BN384_OBJ) -shared $(LDFLAGS) $(BN384_SLIB_LDFLAGS)
 
 $(BN512_SLIB): $(BN512_OBJ) $(MCL_SLIB)
-	$(PRE)$(CXX) -o $@ $(BN512_OBJ) -shared $(LDFLAGS) $(MAC_LDFLAGS)
+	$(PRE)$(CXX) -o $@ $(BN512_OBJ) -shared $(LDFLAGS) $(BN512_SLIB_LDFLAGS)
 
 $(ASM_OBJ): $(ASM_SRC)
 	$(PRE)$(CXX) -c $< -o $@ $(CFLAGS)
@@ -185,11 +199,14 @@ $(LOW_ASM_OBJ): $(LOW_ASM_SRC)
 ifeq ($(OS),mac)
   MAC_GO_LDFLAGS="-ldflags=-s"
 endif
+# set PATH for mingw, set LD_RUN_PATH is for other env
 test_go256: $(MCL_SLIB) $(BN256_SLIB)
-	cd ffi/go/mcl && env LD_RUN_PATH="../../../lib" CGO_CFLAGS="-I../../../include" CGO_LDFLAGS="-L../../../lib -l$(BN256_SNAME) -l$(MCL_SNAME) -lgmpxx -lgmp -lcrypto -lstdc++" go test $(MAC_GO_LDFLAGS) -tags bn256 .
+#	cd ffi/go/mcl && env PATH="$$PATH:../../../lib" LD_RUN_PATH="../../../lib" CGO_LDFLAGS="-L../../../lib -l$(BN256_SNAME) -l$(MCL_SNAME) -lgmpxx -lgmp -lcrypto -lstdc++" go test $(MAC_GO_LDFLAGS) -tags bn256 .
+	cd ffi/go/mcl && env PATH="$$PATH:../../../lib" LD_RUN_PATH="../../../lib" go test $(MAC_GO_LDFLAGS) -tags bn256 .
 
 test_go384: $(MCL_SLIB) $(BN384_SLIB)
-	cd ffi/go/mcl && env LD_RUN_PATH="../../../lib" CGO_CFLAGS="-I../../../include" CGO_LDFLAGS="-L../../../lib -l$(BN384_SNAME) -l$(MCL_SNAME) -lgmpxx -lgmp -lcrypto -lstdc++" go test $(MAC_GO_LDFLAGS) .
+#	cd ffi/go/mcl && env LD_RUN_PATH="../../../lib" CGO_CFLAGS="-I../../../include" CGO_LDFLAGS="-L../../../lib -l$(BN384_SNAME) -l$(MCL_SNAME) -lgmpxx -lgmp -lcrypto -lstdc++" go test $(MAC_GO_LDFLAGS) .
+	cd ffi/go/mcl && env PATH="$$PATH:../../../lib" LD_RUN_PATH="../../../lib" go test $(MAC_GO_LDFLAGS) -tags bn384 .
 
 test_go:
 	$(MAKE) test_go256
@@ -244,7 +261,7 @@ test: $(TEST_EXE)
 	@grep -v "ng=0, exception=0" result.txt; if [ $$? -eq 1 ]; then echo "all unit tests succeed"; else exit 1; fi
 
 EMCC_OPT=-I./include -I./src -I../cybozulib/include -Wall -Wextra
-EMCC_OPT+=-O3 -DNDEBUG -DMCLSHE_WIN_SIZE=8 -Os
+EMCC_OPT+=-O3 -DNDEBUG -DMCLSHE_WIN_SIZE=8
 EMCC_OPT+=-s WASM=1 -s NO_EXIT_RUNTIME=1 -s MODULARIZE=1 #-s ASSERTIONS=1
 EMCC_OPT+=-DCYBOZU_MINIMUM_EXCEPTION
 EMCC_OPT+=-s ABORTING_MALLOC=0
@@ -280,11 +297,14 @@ she-wasm:
 ecdsa-wasm:
 	$(MAKE) ../ecdsa-wasm/ecdsa_c.js
 
+# test
 bin/emu:
 	$(CXX) -g -o $@ src/fp.cpp src/bn_c256.cpp test/bn_c256_test.cpp -DMCL_DONT_USE_XBYAK -DMCL_DONT_USE_OPENSSL -DMCL_USE_VINT -DMCL_SIZEOF_UNIT=8 -DMCL_VINT_64BIT_PORTABLE -DMCL_VINT_FIXED_BUFFER -DMCL_MAX_BIT_SIZE=256 -I./include -I../cybozulib/include
+bin/pairing_c_min.exe:
+	$(CXX) -o $@ sample/pairing_c.c src/fp.cpp src/bn_c256.cpp -Ofast -g -I./include -I../cybozulib/include -fno-exceptions -fno-rtti -fno-threadsafe-statics -DMCL_DONT_USE_XBYAK -DMCL_DONT_USE_OPENSSL -DMCL_USE_VINT -DMCL_SIZEOF_UNIT=8 -DMCL_VINT_FIXED_BUFFER -DCYBOZU_DONT_USE_EXCEPTION -DCYBOZU_DONT_USE_STRING -DMCL_DONT_USE_CSPRNG -DMCL_MAX_BIT_SIZE=256
 
 clean:
-	$(RM) $(MCL_LIB) $(MCL_SLIB) $(BN256_LIB) $(BN256_SLIB) $(BN384_LIB) $(BN384_SLIB) $(BN512_LIB) $(BN512_SLIB) $(SHE256_LIB) $(OBJ_DIR)/*.o $(OBJ_DIR)/*.d $(EXE_DIR)/*.exe $(GEN_EXE) $(ASM_OBJ) $(LIB_OBJ) $(BN256_OBJ) $(BN384_OBJ) $(BN512_OBJ) $(LLVM_SRC) $(FUNC_LIST) src/*.ll
+	$(RM) $(MCL_LIB) $(MCL_SLIB) $(BN256_LIB) $(BN256_SLIB) $(BN384_LIB) $(BN384_SLIB) $(BN512_LIB) $(BN512_SLIB) $(SHE256_LIB) $(OBJ_DIR)/*.o $(OBJ_DIR)/*.d $(EXE_DIR)/*.exe $(GEN_EXE) $(ASM_OBJ) $(LIB_OBJ) $(BN256_OBJ) $(BN384_OBJ) $(BN512_OBJ) $(LLVM_SRC) $(FUNC_LIST) src/*.ll lib/*.a
 
 ALL_SRC=$(SRC_SRC) $(TEST_SRC) $(SAMPLE_SRC)
 DEPEND_FILE=$(addprefix $(OBJ_DIR)/, $(addsuffix .d,$(basename $(ALL_SRC))))
